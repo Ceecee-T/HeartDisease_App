@@ -1,6 +1,8 @@
 import os
 import joblib
+import numpy as np
 import pandas as pd
+import shap
 import streamlit as st
 
 SAVE_DIR = "saved_streamlit_frameworks"
@@ -13,12 +15,28 @@ st.set_page_config(
 
 @st.cache_resource
 def load_components(prefix):
-    return {
+    components = {
         "preprocessor": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_preprocessor.pkl")),
         "model": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_final_model.pkl")),
         "threshold": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_threshold.pkl")),
         "selected_features": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_selected_features.pkl")),
+        "background": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_background.pkl")),
     }
+    return components
+
+
+@st.cache_resource
+def build_explainer(prefix, _model, _background):
+    # KernelExplainer treats the model as a black box, which is what we want
+    # for a stacked ensemble (base learners + meta-learner) rather than a
+    # single tree model. Wrapping predict_proba and taking the positive
+    # class column (index 1) gives SHAP values for "probability of high risk".
+    def predict_fn(data):
+        return _model.predict_proba(data)[:, 1]
+
+    explainer = shap.KernelExplainer(predict_fn, _background)
+    return explainer
+
 
 def get_feature_names(preprocessor):
     feature_names = []
@@ -37,6 +55,7 @@ def get_feature_names(preprocessor):
 
     return list(feature_names)
 
+
 def predict_from_raw(raw_df, components):
     processed_array = components["preprocessor"].transform(raw_df)
     feature_names = get_feature_names(components["preprocessor"])
@@ -50,7 +69,58 @@ def predict_from_raw(raw_df, components):
     prediction = 1 if probability >= threshold else 0
     label = "High Heart Disease Risk" if prediction == 1 else "Low Heart Disease Risk"
 
-    return probability, threshold, prediction, label
+    return probability, threshold, prediction, label, selected_df
+
+
+def explain_prediction(selected_df, components, prefix, top_n=3):
+    """
+    Returns a list of (feature_name, value, shap_value) for the top_n
+    features pushing this prediction toward higher or lower risk.
+    """
+    explainer = build_explainer(prefix, components["model"], components["background"])
+
+    # nsamples kept modest so a single click stays responsive; raise it
+    # if explanations look noisy and a slower response is acceptable.
+    shap_values = explainer.shap_values(selected_df, nsamples=100)
+
+    # shap_values shape: (1, n_features) for a single row
+    row_shap = np.array(shap_values)[0]
+    row_values = selected_df.iloc[0]
+
+    contributions = list(zip(selected_df.columns, row_values.values, row_shap))
+
+    # Sort by magnitude of contribution, largest first
+    contributions.sort(key=lambda c: abs(c[2]), reverse=True)
+
+    return contributions[:top_n]
+
+
+def format_explanation(contributions, prediction):
+    direction_word = "increasing" if prediction == 1 else "lowering"
+
+    parts = []
+    for feature_name, value, shap_value in contributions:
+        if isinstance(value, float):
+            value_str = f"{value:.2f}".rstrip("0").rstrip(".")
+        else:
+            value_str = str(value)
+        parts.append(f"**{feature_name}** ({value_str})")
+
+    feature_list = ", ".join(parts[:-1]) + (f", and {parts[-1]}" if len(parts) > 1 else parts[0])
+
+    if prediction == 1:
+        sentence = (
+            f"Your predicted risk is elevated mainly because of {feature_list}, "
+            f"which had the largest effect on {direction_word} this prediction."
+        )
+    else:
+        sentence = (
+            f"Your predicted risk is low mainly because of {feature_list}, "
+            f"which had the largest effect on {direction_word} this prediction."
+        )
+
+    return sentence
+
 
 framingham = load_components("Framingham")
 uci = load_components("UCI_Heart_Disease")
@@ -111,6 +181,7 @@ if model_choice == "Framingham":
     }])
 
     components = framingham
+    prefix = "Framingham"
 
 else:
     st.subheader("UCI Heart Disease Patient Input")
@@ -155,13 +226,14 @@ else:
     }])
 
     components = uci
+    prefix = "UCI_Heart_Disease"
 
 st.markdown("---")
 st.subheader("Input Preview")
 st.dataframe(input_df, use_container_width=True)
 
 if st.button("Predict Heart Disease Risk"):
-    probability, threshold, prediction, label = predict_from_raw(input_df, components)
+    probability, threshold, prediction, label, selected_df = predict_from_raw(input_df, components)
 
     st.subheader("Prediction Result")
 
@@ -175,3 +247,24 @@ if st.button("Predict Heart Disease Risk"):
         st.error(label)
     else:
         st.success(label)
+
+    with st.spinner("Working out why..."):
+        try:
+            contributions = explain_prediction(selected_df, components, prefix)
+            explanation_sentence = format_explanation(contributions, prediction)
+
+            st.subheader("Why this prediction?")
+            st.markdown(explanation_sentence)
+
+            with st.expander("See the underlying contribution values"):
+                contrib_df = pd.DataFrame(
+                    contributions,
+                    columns=["Feature", "Patient Value", "Contribution (SHAP value)"]
+                )
+                st.dataframe(contrib_df, use_container_width=True)
+
+        except Exception as e:
+            st.info(
+                "An explanation could not be generated for this prediction. "
+                "The risk result above is still valid."
+            )
