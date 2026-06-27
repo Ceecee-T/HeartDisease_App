@@ -1,0 +1,2 @@
+age,sex,dataset,cp,trestbps,chol,fbs,restecg,thalch,exang,oldpeak,slope,ca,thal
+49,Male,Hungary,asymptomatic,130.0,206.0,False,normal,170.0,False,0.0,,,
