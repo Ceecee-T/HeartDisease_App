@@ -3,7 +3,8 @@ import streamlit as st
 st.set_page_config(
     page_title="About | Heart Disease Risk Prediction",
     page_icon="ℹ️",
-    layout="wide"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
 st.title("About This Application")
