@@ -1,8 +1,6 @@
 import os
 import joblib
-import numpy as np
 import pandas as pd
-import shap
 import streamlit as st
 
 SAVE_DIR = "saved_streamlit_frameworks"
@@ -20,17 +18,7 @@ def load_components(prefix):
         "model": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_final_model.pkl")),
         "threshold": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_threshold.pkl")),
         "selected_features": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_selected_features.pkl")),
-        "background": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_background.pkl")),
     }
-
-@st.cache_resource
-def build_explainer(prefix, _model, _background):
-    # treats the whole stacked ensemble as a black box, since it's base
-    # learners + a meta-learner rather than a single tree model
-    def predict_fn(data):
-        return _model.predict_proba(data)[:, 1]
-
-    return shap.KernelExplainer(predict_fn, _background)
 
 def get_feature_names(preprocessor):
     feature_names = []
@@ -62,44 +50,7 @@ def predict_from_raw(raw_df, components):
     prediction = 1 if probability >= threshold else 0
     label = "High Heart Disease Risk" if prediction == 1 else "Low Heart Disease Risk"
 
-    return probability, threshold, prediction, label, selected_df
-
-def explain_prediction(selected_df, components, prefix, top_n=3):
-    explainer = build_explainer(prefix, components["model"], components["background"])
-
-    # nsamples kept modest so a click stays responsive
-    shap_values = explainer.shap_values(selected_df, nsamples=100)
-
-    row_shap = np.array(shap_values)[0]
-    row_values = selected_df.iloc[0]
-
-    contributions = list(zip(selected_df.columns, row_values.values, row_shap))
-    contributions.sort(key=lambda c: abs(c[2]), reverse=True)
-
-    return contributions[:top_n]
-
-def format_explanation(contributions, prediction):
-    direction_word = "increasing" if prediction == 1 else "lowering"
-
-    parts = []
-    for feature_name, value, shap_value in contributions:
-        if isinstance(value, float):
-            value_str = f"{value:.2f}".rstrip("0").rstrip(".")
-        else:
-            value_str = str(value)
-        parts.append(f"**{feature_name}** ({value_str})")
-
-    if len(parts) > 1:
-        feature_list = ", ".join(parts[:-1]) + f", and {parts[-1]}"
-    else:
-        feature_list = parts[0]
-
-    risk_word = "elevated" if prediction == 1 else "low"
-
-    return (
-        f"Your predicted risk is {risk_word} mainly because of {feature_list}, "
-        f"which had the largest effect on {direction_word} this prediction."
-    )
+    return probability, threshold, prediction, label
 
 framingham = load_components("Framingham")
 uci = load_components("UCI_Heart_Disease")
@@ -160,7 +111,6 @@ if model_choice == "Framingham":
     }])
 
     components = framingham
-    prefix = "Framingham"
 
 else:
     st.subheader("UCI Heart Disease Patient Input")
@@ -205,14 +155,13 @@ else:
     }])
 
     components = uci
-    prefix = "UCI_Heart_Disease"
 
 st.markdown("---")
 st.subheader("Input Preview")
 st.dataframe(input_df, use_container_width=True)
 
 if st.button("Predict Heart Disease Risk"):
-    probability, threshold, prediction, label, selected_df = predict_from_raw(input_df, components)
+    probability, threshold, prediction, label = predict_from_raw(input_df, components)
 
     st.subheader("Prediction Result")
 
@@ -226,24 +175,3 @@ if st.button("Predict Heart Disease Risk"):
         st.error(label)
     else:
         st.success(label)
-
-    with st.spinner("Working out why..."):
-        try:
-            contributions = explain_prediction(selected_df, components, prefix)
-            explanation_sentence = format_explanation(contributions, prediction)
-
-            st.subheader("Why this prediction?")
-            st.markdown(explanation_sentence)
-
-            with st.expander("See the underlying contribution values"):
-                contrib_df = pd.DataFrame(
-                    contributions,
-                    columns=["Feature", "Patient Value", "Contribution (SHAP value)"]
-                )
-                st.dataframe(contrib_df, use_container_width=True)
-
-        except Exception as e:
-            st.info(
-                "An explanation could not be generated for this prediction. "
-                "The risk result above is still valid."
-            )
