@@ -3,6 +3,7 @@ import joblib
 import numpy as np
 import pandas as pd
 import shap
+import matplotlib.pyplot as plt
 import streamlit as st
 
 SAVE_DIR = "saved_streamlit_frameworks"
@@ -175,6 +176,35 @@ def format_explanation(contributions, prediction):
         f"which had the largest effect on {direction_word} this prediction."
     )
 
+def risk_tier(probability, threshold):
+    # a continuous probability is reduced to three plain-language bands,
+    # using the model's own decision threshold as the boundary for "high"
+    # and the midpoint between 0 and the threshold as the boundary for
+    # "borderline", so the three bands scale with whatever threshold a
+    # given dataset's model was tuned to
+    if probability >= threshold:
+        return "High"
+    elif probability >= threshold * 0.6:
+        return "Borderline"
+    else:
+        return "Low"
+
+def plot_contributions(contributions):
+    # horizontal bar chart of the top contributing factors, colored by
+    # whether each one pushed risk up (red) or down (green)
+    labels = [c[0] for c in contributions][::-1]
+    shap_vals = [c[2] for c in contributions][::-1]
+    colors = ["#d62728" if v > 0 else "#2ca02c" for v in shap_vals]
+
+    fig, ax = plt.subplots(figsize=(6, 2.5))
+    ax.barh(labels, shap_vals, color=colors)
+    ax.axvline(0, color="black", linewidth=0.8)
+    ax.set_xlabel("Effect on predicted risk")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    return fig
+
 framingham = load_components("Framingham")
 uci = load_components("UCI_Heart_Disease")
 
@@ -195,13 +225,16 @@ if model_choice == "Framingham":
     col1, col2, col3 = st.columns(3)
 
     with col1:
+        st.markdown("**Demographics**")
         male = st.selectbox("Sex", ["Female", "Male"])
         age = st.number_input("Age", 18, 100, 50)
         education = st.selectbox("Education Level", [1.0, 2.0, 3.0, 4.0])
+        st.markdown("**Smoking**")
         currentSmoker = st.selectbox("Current Smoker", ["No", "Yes"])
         cigsPerDay = st.number_input("Cigarettes Per Day", 0.0, 100.0, 0.0)
 
     with col2:
+        st.markdown("**Medical History**")
         BPMeds = st.selectbox("On BP Medication", ["No", "Yes"])
         prevalentStroke = st.selectbox("History of Stroke", ["No", "Yes"])
         prevalentHyp = st.selectbox("Hypertension", ["No", "Yes"])
@@ -209,6 +242,7 @@ if model_choice == "Framingham":
         totChol = st.number_input("Total Cholesterol", 80.0, 700.0, 220.0)
 
     with col3:
+        st.markdown("**Vitals**")
         sysBP = st.number_input("Systolic BP", 70.0, 260.0, 120.0)
         diaBP = st.number_input("Diastolic BP", 40.0, 160.0, 80.0)
         BMI = st.number_input("BMI", 10.0, 80.0, 25.0)
@@ -242,20 +276,25 @@ else:
     col1, col2, col3 = st.columns(3)
 
     with col1:
+        st.markdown("**Demographics**")
         age = st.number_input("Age", 18, 100, 55)
         sex = st.selectbox("Sex", ["Female", "Male"])
         dataset = st.selectbox("Clinical Site", ["Cleveland", "Hungary", "Switzerland", "VA Long Beach"])
+        st.markdown("**Symptoms**")
         cp = st.selectbox("Chest Pain Type", ["typical angina", "atypical angina", "non-anginal", "asymptomatic"])
         trestbps = st.number_input("Resting BP", 70.0, 260.0, 130.0)
 
     with col2:
+        st.markdown("**Blood Work**")
         chol = st.number_input("Cholesterol", 80.0, 700.0, 240.0)
         fbs = st.selectbox("Fasting Blood Sugar > 120", ["False", "True"])
+        st.markdown("**Heart Activity**")
         restecg = st.selectbox("Resting ECG", ["normal", "st-t abnormality", "lv hypertrophy"])
         thalch = st.number_input("Max Heart Rate", 50.0, 250.0, 150.0)
         exang = st.selectbox("Exercise Induced Angina", ["False", "True"])
 
     with col3:
+        st.markdown("**Exercise Test Results**")
         oldpeak = st.number_input("Oldpeak", 0.0, 10.0, 1.0)
         slope = st.selectbox("Slope", ["upsloping", "flat", "downsloping"])
         ca = st.number_input("Number of Major Vessels", 0.0, 4.0, 0.0)
@@ -287,14 +326,28 @@ st.dataframe(input_df, use_container_width=True)
 
 if st.button("Predict Heart Disease Risk"):
     probability, threshold, prediction, label, selected_df = predict_from_raw(input_df, components)
+    tier = risk_tier(probability, threshold)
 
     st.subheader("Prediction Result")
 
     c1, c2, c3 = st.columns(3)
-
     c1.metric("Risk Probability", f"{probability:.3f}")
     c2.metric("Decision Threshold", f"{threshold:.3f}")
-    c3.metric("Prediction", "High Risk" if prediction == 1 else "Low Risk")
+    c3.metric("Risk Tier", tier)
+
+    # visual probability bar with the decision threshold marked, so it's
+    # immediately clear how close the result was to the cutoff
+    tier_colors = {"Low": "#2ca02c", "Borderline": "#ff7f0e", "High": "#d62728"}
+    st.markdown(
+        f"""
+        <div style="background-color:#eee; border-radius:8px; height:28px; position:relative; width:100%;">
+            <div style="background-color:{tier_colors[tier]}; height:28px; border-radius:8px; width:{probability*100:.1f}%;"></div>
+            <div style="position:absolute; left:{threshold*100:.1f}%; top:0; height:28px; border-left:2px dashed #333;"></div>
+        </div>
+        <p style="font-size:12px; color:#666; margin-top:4px;">Dashed line marks the decision threshold ({threshold:.2f})</p>
+        """,
+        unsafe_allow_html=True
+    )
 
     if prediction == 1:
         st.error(label)
@@ -308,6 +361,9 @@ if st.button("Predict Heart Disease Risk"):
 
             st.subheader("Why this prediction?")
             st.markdown(explanation_sentence)
+
+            fig = plot_contributions(contributions)
+            st.pyplot(fig)
 
             with st.expander("See the underlying contribution values"):
                 contrib_df = pd.DataFrame(
