@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import joblib
+import shap
 
 st.set_page_config(page_title="Heart Disease Risk Prediction", layout="centered")
 
@@ -18,6 +20,7 @@ model_choice = st.selectbox(
 if model_choice == "Framingham Heart Study Model":
     model = joblib.load("framingham_model.joblib")
     threshold = 0.36
+    background_data = joblib.load("framingham_background.joblib")
 
     st.subheader("Enter Patient Clinical Information")
 
@@ -58,6 +61,7 @@ if model_choice == "Framingham Heart Study Model":
 else:
     model = joblib.load("uci_model.joblib")
     threshold = 0.37
+    background_data = joblib.load("uci_background.joblib")
 
     st.subheader("Enter Patient Clinical Information")
 
@@ -93,6 +97,15 @@ else:
         "thal": thal
     }])
 
+# cache the explainer per model so it's only built once per session,
+# not rebuilt every time the Predict button is clicked
+@st.cache_resource
+def get_explainer(_model, _background_data):
+    def predict_fn(data):
+        return _model.predict_proba(data)[:, 1]
+    return shap.KernelExplainer(predict_fn, _background_data)
+
+
 if st.button("Predict Heart Disease Risk"):
     probability = model.predict_proba(input_data)[0][1]
     prediction = 1 if probability >= threshold else 0
@@ -106,3 +119,53 @@ if st.button("Predict Heart Disease Risk"):
         st.error("Prediction: High Heart Disease Risk")
     else:
         st.success("Prediction: Low Heart Disease Risk")
+
+    # explain the prediction in plain language rather than showing
+    # a raw SHAP plot, since the audience is not technical
+    with st.spinner("Working out why..."):
+        try:
+            explainer = get_explainer(model, background_data)
+            shap_values = explainer.shap_values(input_data, nsamples=100)
+
+            row_shap = np.array(shap_values)[0]
+            row_values = input_data.iloc[0]
+
+            contributions = list(zip(input_data.columns, row_values.values, row_shap))
+            contributions.sort(key=lambda c: abs(c[2]), reverse=True)
+            top_contributions = contributions[:3]
+
+            direction_word = "increasing" if prediction == 1 else "lowering"
+
+            parts = []
+            for feature_name, value, shap_value in top_contributions:
+                if isinstance(value, float):
+                    value_str = f"{value:.2f}".rstrip("0").rstrip(".")
+                else:
+                    value_str = str(value)
+                parts.append(f"**{feature_name}** ({value_str})")
+
+            if len(parts) > 1:
+                feature_list = ", ".join(parts[:-1]) + f", and {parts[-1]}"
+            else:
+                feature_list = parts[0]
+
+            risk_word = "elevated" if prediction == 1 else "low"
+
+            st.subheader("Why this prediction?")
+            st.write(
+                f"Your predicted risk is {risk_word} mainly because of {feature_list}, "
+                f"which had the largest effect on {direction_word} this prediction."
+            )
+
+            with st.expander("See the underlying contribution values"):
+                contrib_df = pd.DataFrame(
+                    top_contributions,
+                    columns=["Feature", "Patient Value", "Contribution (SHAP value)"]
+                )
+                st.dataframe(contrib_df, use_container_width=True)
+
+        except Exception as e:
+            st.info(
+                "An explanation could not be generated for this prediction. "
+                "The risk result above is still valid."
+            )
