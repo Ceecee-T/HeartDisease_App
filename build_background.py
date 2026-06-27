@@ -1,29 +1,55 @@
 # builds the small background samples shap needs to explain a prediction
-# run this once locally, then commit the two .joblib files it creates
-# alongside framingham_model.joblib and uci_model.joblib
+# everything sits flat in this folder, same as the other .pkl files
+# run once locally, then commit the two new *_background.pkl files
 
-import pandas as pd
 import joblib
+import pandas as pd
 
 N_BACKGROUND_ROWS = 100
 
-# raw training data, same column names/order as what the app builds
-# in input_data, since the pipeline does its own preprocessing internally
+
+def get_feature_names(preprocessor):
+    feature_names = []
+
+    for name, transformer, columns in preprocessor.transformers_:
+        if name == "remainder":
+            continue
+
+        if name == "numeric":
+            feature_names.extend(columns)
+
+        elif name == "categorical":
+            encoder = transformer.named_steps["encoder"]
+            encoded_names = encoder.get_feature_names_out(columns)
+            feature_names.extend(encoded_names)
+
+    return list(feature_names)
+
+
+def build_background(prefix, raw_df):
+    preprocessor = joblib.load(f"{prefix}_preprocessor.pkl")
+    selected_features = joblib.load(f"{prefix}_selected_features.pkl")
+
+    sample_raw = raw_df.sample(
+        n=min(N_BACKGROUND_ROWS, len(raw_df)),
+        random_state=42
+    ).reset_index(drop=True)
+
+    processed_array = preprocessor.transform(sample_raw)
+    feature_names = get_feature_names(preprocessor)
+
+    processed_df = pd.DataFrame(processed_array, columns=feature_names)
+    selected_df = processed_df[selected_features]
+
+    output_path = f"{prefix}_background.pkl"
+    joblib.dump(selected_df, output_path)
+
+    print(f"saved {output_path}", selected_df.shape)
+
+
+# raw training csvs, same column names the app's input_df builds
 framingham_raw_df = pd.read_csv("framingham.csv")
 uci_raw_df = pd.read_csv("uci_heart_disease.csv")
 
-framingham_background = framingham_raw_df.sample(
-    n=min(N_BACKGROUND_ROWS, len(framingham_raw_df)),
-    random_state=42
-).reset_index(drop=True)
-
-uci_background = uci_raw_df.sample(
-    n=min(N_BACKGROUND_ROWS, len(uci_raw_df)),
-    random_state=42
-).reset_index(drop=True)
-
-joblib.dump(framingham_background, "framingham_background.joblib")
-joblib.dump(uci_background, "uci_background.joblib")
-
-print("saved framingham_background.joblib", framingham_background.shape)
-print("saved uci_background.joblib", uci_background.shape)
+build_background("Framingham", framingham_raw_df)
+build_background("UCI_Heart_Disease", uci_raw_df)
