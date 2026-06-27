@@ -8,6 +8,8 @@ import pandas as pd
 
 SAVE_DIR = "saved_streamlit_frameworks"
 N_BACKGROUND_ROWS = 100
+framingham_raw_df = pd.read_csv("framingham.csv")
+uci_raw_df = pd.read_csv("heart_disease_uci.csv")
 
 
 def get_feature_names(preprocessor):
@@ -51,7 +53,7 @@ def build_background(prefix, raw_df):
 
 # raw training csvs, same column names the app's input_df builds
 framingham_raw_df = pd.read_csv("framingham.csv")
-uci_raw_df = pd.read_csv("uci_heart_disease.csv")
+uci_raw_df = pd.read_csv("heart_disease_uci.csv")
 
 build_background("Framingham", framingham_raw_df)
 build_background("UCI_Heart_Disease", uci_raw_df)
