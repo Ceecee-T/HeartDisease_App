@@ -1,10 +1,12 @@
 # builds the small background samples shap needs to explain a prediction
-# everything sits flat in this folder, same as the other .pkl files
-# run once locally, then commit the two new *_background.pkl files
+# matches SAVE_DIR in app.py, run once locally then commit the two new
+# *_background.pkl files into saved_streamlit_frameworks alongside the rest
 
+import os
 import joblib
 import pandas as pd
 
+SAVE_DIR = "saved_streamlit_frameworks"
 N_BACKGROUND_ROWS = 100
 
 
@@ -27,8 +29,8 @@ def get_feature_names(preprocessor):
 
 
 def build_background(prefix, raw_df):
-    preprocessor = joblib.load(f"{prefix}_preprocessor.pkl")
-    selected_features = joblib.load(f"{prefix}_selected_features.pkl")
+    preprocessor = joblib.load(os.path.join(SAVE_DIR, f"{prefix}_preprocessor.pkl"))
+    selected_features = joblib.load(os.path.join(SAVE_DIR, f"{prefix}_selected_features.pkl"))
 
     sample_raw = raw_df.sample(
         n=min(N_BACKGROUND_ROWS, len(raw_df)),
@@ -41,7 +43,7 @@ def build_background(prefix, raw_df):
     processed_df = pd.DataFrame(processed_array, columns=feature_names)
     selected_df = processed_df[selected_features]
 
-    output_path = f"{prefix}_background.pkl"
+    output_path = os.path.join(SAVE_DIR, f"{prefix}_background.pkl")
     joblib.dump(selected_df, output_path)
 
     print(f"saved {output_path}", selected_df.shape)

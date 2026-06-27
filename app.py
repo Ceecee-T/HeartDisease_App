@@ -1,367 +1,249 @@
-import time
+import os
 import joblib
 import numpy as np
 import pandas as pd
+import shap
 import streamlit as st
-import matplotlib.pyplot as plt
 
-
-# ============================================================
-# PAGE CONFIGURATION
-# ============================================================
+SAVE_DIR = "saved_streamlit_frameworks"
 
 st.set_page_config(
-   page_title="Heart Disease Prediction System",
-   page_icon="❤️",
-   layout="wide"
+    page_title="Heart Disease Risk Prediction",
+    page_icon="🫀",
+    layout="wide"
 )
-
-
-# ============================================================
-# LOAD SAVED FRAMEWORK
-# ============================================================
 
 @st.cache_resource
-def load_framework(dataset_name):
-   if dataset_name == "Framingham":
-       folder = "saved_framingham_framework"
-       prefix = "Framingham"
-   else:
-       folder = "saved_uci_framework"
-       prefix = "UCI_Heart_Disease"
+def load_components(prefix):
+    return {
+        "preprocessor": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_preprocessor.pkl")),
+        "model": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_final_model.pkl")),
+        "threshold": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_threshold.pkl")),
+        "selected_features": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_selected_features.pkl")),
+        "background": joblib.load(os.path.join(SAVE_DIR, f"{prefix}_background.pkl")),
+    }
 
-   preprocessor = joblib.load(f"{folder}/{prefix}_preprocessor.pkl")
-   selector = joblib.load(f"{folder}/{prefix}_feature_selector.pkl")
-   model = joblib.load(f"{folder}/{prefix}_final_model.pkl")
-   selected_features = joblib.load(f"{folder}/{prefix}_selected_features.pkl")
-   threshold = joblib.load(f"{folder}/{prefix}_threshold.pkl")
-   metadata = joblib.load(f"{folder}/{prefix}_metadata.pkl")
+@st.cache_resource
+def build_explainer(prefix, _model, _background):
+    # treats the whole stacked ensemble as a black box, since it's base
+    # learners + a meta-learner rather than a single tree model
+    def predict_fn(data):
+        return _model.predict_proba(data)[:, 1]
 
-   return {
-       "preprocessor": preprocessor,
-       "selector": selector,
-       "model": model,
-       "selected_features": selected_features,
-       "threshold": threshold,
-       "metadata": metadata
-   }
-
+    return shap.KernelExplainer(predict_fn, _background)
 
 def get_feature_names(preprocessor):
-   feature_names = []
+    feature_names = []
 
-   for name, transformer, columns in preprocessor.transformers_:
-       if name == "remainder":
-           continue
+    for name, transformer, columns in preprocessor.transformers_:
+        if name == "remainder":
+            continue
 
-       if name == "numeric":
-           feature_names.extend(columns)
+        if name == "numeric":
+            feature_names.extend(columns)
 
-       elif name == "categorical":
-           encoder = transformer.named_steps["encoder"]
-           encoded_names = encoder.get_feature_names_out(columns)
-           feature_names.extend(encoded_names)
+        elif name == "categorical":
+            encoder = transformer.named_steps["encoder"]
+            encoded_names = encoder.get_feature_names_out(columns)
+            feature_names.extend(encoded_names)
 
-   return list(feature_names)
+    return list(feature_names)
 
+def predict_from_raw(raw_df, components):
+    processed_array = components["preprocessor"].transform(raw_df)
+    feature_names = get_feature_names(components["preprocessor"])
 
-def predict_patient(raw_df, framework):
-   preprocessor = framework["preprocessor"]
-   model = framework["model"]
-   selected_features = framework["selected_features"]
-   threshold = framework["threshold"]
+    processed_df = pd.DataFrame(processed_array, columns=feature_names)
+    selected_df = processed_df[components["selected_features"]]
 
-   processed_array = preprocessor.transform(raw_df)
-   processed_feature_names = get_feature_names(preprocessor)
+    probability = components["model"].predict_proba(selected_df)[:, 1][0]
+    threshold = components["threshold"]
 
-   processed_df = pd.DataFrame(
-       processed_array,
-       columns=processed_feature_names
-   )
+    prediction = 1 if probability >= threshold else 0
+    label = "High Heart Disease Risk" if prediction == 1 else "Low Heart Disease Risk"
 
-   selected_df = processed_df[selected_features]
+    return probability, threshold, prediction, label, selected_df
 
-   probability = model.predict_proba(selected_df)[:, 1][0]
-   prediction = 1 if probability >= threshold else 0
+def explain_prediction(selected_df, components, prefix, top_n=3):
+    explainer = build_explainer(prefix, components["model"], components["background"])
 
-   return prediction, probability, selected_df
+    # nsamples kept modest so a click stays responsive
+    shap_values = explainer.shap_values(selected_df, nsamples=100)
 
+    row_shap = np.array(shap_values)[0]
+    row_values = selected_df.iloc[0]
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+    contributions = list(zip(selected_df.columns, row_values.values, row_shap))
+    contributions.sort(key=lambda c: abs(c[2]), reverse=True)
 
-st.sidebar.title("Navigation")
+    return contributions[:top_n]
 
-page = st.sidebar.radio(
-   "Go to",
-   [
-       "Home",
-       "Patient Prediction",
-       "Model Information",
-       "About Prototype"
-   ]
+def format_explanation(contributions, prediction):
+    direction_word = "increasing" if prediction == 1 else "lowering"
+
+    parts = []
+    for feature_name, value, shap_value in contributions:
+        if isinstance(value, float):
+            value_str = f"{value:.2f}".rstrip("0").rstrip(".")
+        else:
+            value_str = str(value)
+        parts.append(f"**{feature_name}** ({value_str})")
+
+    if len(parts) > 1:
+        feature_list = ", ".join(parts[:-1]) + f", and {parts[-1]}"
+    else:
+        feature_list = parts[0]
+
+    risk_word = "elevated" if prediction == 1 else "low"
+
+    return (
+        f"Your predicted risk is {risk_word} mainly because of {feature_list}, "
+        f"which had the largest effect on {direction_word} this prediction."
+    )
+
+framingham = load_components("Framingham")
+uci = load_components("UCI_Heart_Disease")
+
+st.title("Explainable Stacked Ensemble Model for Heart Disease Risk Prediction")
+
+st.warning(
+    "This application is for academic research demonstration only and is not a substitute for professional medical diagnosis."
 )
 
-dataset_choice = st.sidebar.selectbox(
-   "Select Dataset Framework",
-   ["Framingham", "UCI Heart Disease"]
+model_choice = st.sidebar.selectbox(
+    "Select Model",
+    ["Framingham", "UCI Heart Disease"]
 )
 
-framework = load_framework(dataset_choice)
+if model_choice == "Framingham":
+    st.subheader("Framingham Patient Input")
 
+    col1, col2, col3 = st.columns(3)
 
-# ============================================================
-# HOME PAGE
-# ============================================================
+    with col1:
+        male = st.selectbox("Sex", ["Female", "Male"])
+        age = st.number_input("Age", 18, 100, 50)
+        education = st.selectbox("Education Level", [1.0, 2.0, 3.0, 4.0])
+        currentSmoker = st.selectbox("Current Smoker", ["No", "Yes"])
+        cigsPerDay = st.number_input("Cigarettes Per Day", 0.0, 100.0, 0.0)
 
-if page == "Home":
-   st.title("❤️ Explainable Heart Disease Prediction System")
+    with col2:
+        BPMeds = st.selectbox("On BP Medication", ["No", "Yes"])
+        prevalentStroke = st.selectbox("History of Stroke", ["No", "Yes"])
+        prevalentHyp = st.selectbox("Hypertension", ["No", "Yes"])
+        diabetes = st.selectbox("Diabetes", ["No", "Yes"])
+        totChol = st.number_input("Total Cholesterol", 80.0, 700.0, 220.0)
 
-   st.markdown(
-       """
-       This prototype application implements the final heart disease prediction framework developed in this study.
+    with col3:
+        sysBP = st.number_input("Systolic BP", 70.0, 260.0, 120.0)
+        diaBP = st.number_input("Diastolic BP", 40.0, 160.0, 80.0)
+        BMI = st.number_input("BMI", 10.0, 80.0, 25.0)
+        heartRate = st.number_input("Heart Rate", 40.0, 220.0, 75.0)
+        glucose = st.number_input("Glucose", 40.0, 500.0, 85.0)
 
-       The system integrates:
+    input_df = pd.DataFrame([{
+        "male": 1 if male == "Male" else 0,
+        "age": age,
+        "education": education,
+        "currentSmoker": 1 if currentSmoker == "Yes" else 0,
+        "cigsPerDay": cigsPerDay,
+        "BPMeds": 1 if BPMeds == "Yes" else 0,
+        "prevalentStroke": 1 if prevalentStroke == "Yes" else 0,
+        "prevalentHyp": 1 if prevalentHyp == "Yes" else 0,
+        "diabetes": 1 if diabetes == "Yes" else 0,
+        "totChol": totChol,
+        "sysBP": sysBP,
+        "diaBP": diaBP,
+        "BMI": BMI,
+        "heartRate": heartRate,
+        "glucose": glucose
+    }])
 
-       - Data preprocessing
-       - Hybrid feature selection
-       - Class imbalance handling
-       - Stacked ensemble learning
-       - Decision threshold optimization
-       - Explainable prediction output
+    components = framingham
+    prefix = "Framingham"
 
-       The model predicts whether a patient is likely to be at **Low Risk** or **High Risk** of heart disease based on clinical input variables.
-       """
-   )
+else:
+    st.subheader("UCI Heart Disease Patient Input")
 
-   st.subheader("Framework Components")
+    col1, col2, col3 = st.columns(3)
 
-   st.table(
-       pd.DataFrame({
-           "Component": [
-               "Preprocessing",
-               "Feature Selection",
-               "Prediction Model",
-               "Meta-Learner",
-               "Decision Threshold",
-               "Explainability"
-           ],
-           "Implemented Method": [
-               "Imputation, encoding and scaling",
-               "Mutual Information + Correlation Filtering + LASSO",
-               "Logistic Regression, Random Forest, SVM and XGBoost",
-               "LightGBM",
-               f"{framework['threshold']:.3f}",
-               "SHAP-supported interpretation"
-           ]
-       })
-   )
+    with col1:
+        age = st.number_input("Age", 18, 100, 55)
+        sex = st.selectbox("Sex", ["Female", "Male"])
+        dataset = st.selectbox("Clinical Site", ["Cleveland", "Hungary", "Switzerland", "VA Long Beach"])
+        cp = st.selectbox("Chest Pain Type", ["typical angina", "atypical angina", "non-anginal", "asymptomatic"])
+        trestbps = st.number_input("Resting BP", 70.0, 260.0, 130.0)
 
+    with col2:
+        chol = st.number_input("Cholesterol", 80.0, 700.0, 240.0)
+        fbs = st.selectbox("Fasting Blood Sugar > 120", ["False", "True"])
+        restecg = st.selectbox("Resting ECG", ["normal", "st-t abnormality", "lv hypertrophy"])
+        thalch = st.number_input("Max Heart Rate", 50.0, 250.0, 150.0)
+        exang = st.selectbox("Exercise Induced Angina", ["False", "True"])
 
-# ============================================================
-# PATIENT PREDICTION PAGE
-# ============================================================
+    with col3:
+        oldpeak = st.number_input("Oldpeak", 0.0, 10.0, 1.0)
+        slope = st.selectbox("Slope", ["upsloping", "flat", "downsloping"])
+        ca = st.number_input("Number of Major Vessels", 0.0, 4.0, 0.0)
+        thal = st.selectbox("Thalassemia", ["normal", "fixed defect", "reversable defect"])
 
-elif page == "Patient Prediction":
-   st.title("Patient Heart Disease Risk Prediction")
+    input_df = pd.DataFrame([{
+        "age": age,
+        "sex": sex,
+        "dataset": dataset,
+        "cp": cp,
+        "trestbps": trestbps,
+        "chol": chol,
+        "fbs": fbs,
+        "restecg": restecg,
+        "thalch": thalch,
+        "exang": exang,
+        "oldpeak": oldpeak,
+        "slope": slope,
+        "ca": ca,
+        "thal": thal
+    }])
 
-   st.write(
-       "Enter the patient's clinical information below and click **Predict Risk**."
-   )
+    components = uci
+    prefix = "UCI_Heart_Disease"
 
-   if dataset_choice == "Framingham":
-       st.subheader("Framingham Patient Input")
+st.markdown("---")
+st.subheader("Input Preview")
+st.dataframe(input_df, use_container_width=True)
 
-       col1, col2, col3 = st.columns(3)
+if st.button("Predict Heart Disease Risk"):
+    probability, threshold, prediction, label, selected_df = predict_from_raw(input_df, components)
 
-       with col1:
-           male = st.selectbox("Sex", [0, 1], format_func=lambda x: "Female" if x == 0 else "Male")
-           age = st.number_input("Age", min_value=20, max_value=100, value=50)
-           education = st.selectbox("Education Level", [1.0, 2.0, 3.0, 4.0])
-           currentSmoker = st.selectbox("Current Smoker", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes")
-           cigsPerDay = st.number_input("Cigarettes Per Day", min_value=0.0, max_value=80.0, value=0.0)
+    st.subheader("Prediction Result")
 
-       with col2:
-           BPMeds = st.selectbox("On BP Medication", [0.0, 1.0], format_func=lambda x: "No" if x == 0 else "Yes")
-           prevalentStroke = st.selectbox("Previous Stroke", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes")
-           prevalentHyp = st.selectbox("Prevalent Hypertension", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes")
-           diabetes = st.selectbox("Diabetes", [0, 1], format_func=lambda x: "No" if x == 0 else "Yes")
-           totChol = st.number_input("Total Cholesterol", min_value=100.0, max_value=700.0, value=240.0)
+    c1, c2, c3 = st.columns(3)
 
-       with col3:
-           sysBP = st.number_input("Systolic BP", min_value=80.0, max_value=300.0, value=130.0)
-           diaBP = st.number_input("Diastolic BP", min_value=40.0, max_value=160.0, value=80.0)
-           BMI = st.number_input("BMI", min_value=10.0, max_value=70.0, value=25.0)
-           heartRate = st.number_input("Heart Rate", min_value=40.0, max_value=200.0, value=75.0)
-           glucose = st.number_input("Glucose", min_value=40.0, max_value=400.0, value=85.0)
+    c1.metric("Risk Probability", f"{probability:.3f}")
+    c2.metric("Decision Threshold", f"{threshold:.3f}")
+    c3.metric("Prediction", "High Risk" if prediction == 1 else "Low Risk")
 
-       raw_input = pd.DataFrame([{
-           "male": male,
-           "age": age,
-           "education": education,
-           "currentSmoker": currentSmoker,
-           "cigsPerDay": cigsPerDay,
-           "BPMeds": BPMeds,
-           "prevalentStroke": prevalentStroke,
-           "prevalentHyp": prevalentHyp,
-           "diabetes": diabetes,
-           "totChol": totChol,
-           "sysBP": sysBP,
-           "diaBP": diaBP,
-           "BMI": BMI,
-           "heartRate": heartRate,
-           "glucose": glucose
-       }])
+    if prediction == 1:
+        st.error(label)
+    else:
+        st.success(label)
 
-   else:
-       st.subheader("UCI Heart Disease Patient Input")
+    with st.spinner("Working out why..."):
+        try:
+            contributions = explain_prediction(selected_df, components, prefix)
+            explanation_sentence = format_explanation(contributions, prediction)
 
-       col1, col2, col3 = st.columns(3)
+            st.subheader("Why this prediction?")
+            st.markdown(explanation_sentence)
 
-       with col1:
-           age = st.number_input("Age", min_value=20, max_value=100, value=55)
-           sex = st.selectbox("Sex", ["Male", "Female"])
-           dataset = st.selectbox("Dataset Source", ["Cleveland", "Hungary", "Switzerland", "VA Long Beach"])
-           cp = st.selectbox(
-               "Chest Pain Type",
-               ["typical angina", "atypical angina", "non-anginal", "asymptomatic"]
-           )
+            with st.expander("See the underlying contribution values"):
+                contrib_df = pd.DataFrame(
+                    contributions,
+                    columns=["Feature", "Patient Value", "Contribution (SHAP value)"]
+                )
+                st.dataframe(contrib_df, use_container_width=True)
 
-       with col2:
-           trestbps = st.number_input("Resting Blood Pressure", min_value=80.0, max_value=250.0, value=130.0)
-           chol = st.number_input("Cholesterol", min_value=100.0, max_value=700.0, value=240.0)
-           fbs = st.selectbox("Fasting Blood Sugar > 120mg/dl", [False, True])
-           restecg = st.selectbox("Resting ECG", ["normal", "st-t abnormality", "lv hypertrophy"])
-
-       with col3:
-           thalch = st.number_input("Maximum Heart Rate", min_value=60.0, max_value=250.0, value=150.0)
-           exang = st.selectbox("Exercise Induced Angina", [False, True])
-           oldpeak = st.number_input("Oldpeak", min_value=0.0, max_value=10.0, value=1.0)
-           slope = st.selectbox("Slope", ["upsloping", "flat", "downsloping"])
-           ca = st.number_input("Number of Major Vessels", min_value=0.0, max_value=4.0, value=0.0)
-           thal = st.selectbox("Thalassemia", ["normal", "fixed defect", "reversable defect"])
-
-       raw_input = pd.DataFrame([{
-           "age": age,
-           "sex": sex,
-           "dataset": dataset,
-           "cp": cp,
-           "trestbps": trestbps,
-           "chol": chol,
-           "fbs": fbs,
-           "restecg": restecg,
-           "thalch": thalch,
-           "exang": exang,
-           "oldpeak": oldpeak,
-           "slope": slope,
-           "ca": ca,
-           "thal": thal
-       }])
-
-   st.subheader("Input Preview")
-   st.dataframe(raw_input)
-
-   if st.button("Predict Risk"):
-       start_time = time.time()
-
-       prediction, probability, selected_df = predict_patient(
-           raw_input,
-           framework
-       )
-
-       end_time = time.time()
-       response_time = end_time - start_time
-
-       risk_label = "High Heart Disease Risk" if prediction == 1 else "Low Heart Disease Risk"
-
-       st.subheader("Prediction Result")
-
-       if prediction == 1:
-           st.error(f"Prediction: {risk_label}")
-       else:
-           st.success(f"Prediction: {risk_label}")
-
-       st.metric("Risk Probability", f"{probability:.4f}")
-       st.metric("Optimized Decision Threshold", f"{framework['threshold']:.4f}")
-       st.metric("Prediction Response Time", f"{response_time:.4f} seconds")
-
-       st.subheader("Selected Features Used by the Model")
-       st.dataframe(selected_df)
-
-       st.subheader("Prediction Explanation Summary")
-
-       explanation_df = pd.DataFrame({
-           "Selected Feature": selected_df.columns,
-           "Processed Value": selected_df.iloc[0].values
-       })
-
-       st.dataframe(explanation_df)
-
-       report = pd.DataFrame({
-           "Dataset Framework": [dataset_choice],
-           "Prediction": [risk_label],
-           "Risk Probability": [probability],
-           "Optimized Threshold": [framework["threshold"]],
-           "Response Time Seconds": [response_time]
-       })
-
-       csv_report = report.to_csv(index=False).encode("utf-8")
-
-       st.download_button(
-           label="Download Prediction Report",
-           data=csv_report,
-           file_name="heart_disease_prediction_report.csv",
-           mime="text/csv"
-       )
-
-
-# ============================================================
-# MODEL INFORMATION PAGE
-# ============================================================
-
-elif page == "Model Information":
-   st.title("Model Information")
-
-   st.subheader("Selected Framework")
-   st.write(dataset_choice)
-
-   st.subheader("Optimized Threshold")
-   st.write(framework["threshold"])
-
-   st.subheader("Selected Features")
-
-   selected_features_df = pd.DataFrame({
-       "Selected Features": framework["selected_features"]
-   })
-
-   st.dataframe(selected_features_df)
-
-   st.subheader("Framework Metadata")
-   st.json(framework["metadata"])
-
-
-# ============================================================
-# ABOUT PAGE
-# ============================================================
-
-elif page == "About Prototype":
-   st.title("About the Prototype Application")
-
-   st.markdown(
-       """
-       This prototype demonstrates the implementation of the proposed explainable heart disease prediction framework.
-
-       The application allows users to:
-
-       - Enter patient clinical variables.
-       - Generate heart disease risk predictions.
-       - View the predicted probability.
-       - Apply the optimized decision threshold.
-       - Display selected model features.
-       - Download a prediction report.
-
-       The prototype is intended for academic demonstration and decision-support research purposes only.
-       It is not a substitute for professional medical diagnosis.
-       """
-   )
+        except Exception as e:
+            st.info(
+                "An explanation could not be generated for this prediction. "
+                "The risk result above is still valid."
+            )
