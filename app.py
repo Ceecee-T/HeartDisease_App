@@ -7,6 +7,41 @@ import streamlit as st
 
 SAVE_DIR = "saved_streamlit_frameworks"
 
+# friendly labels for each raw input column, used when explaining a
+# prediction in plain language instead of showing the encoded/scaled names
+FRIENDLY_NAMES = {
+    # framingham
+    "male": "being male",
+    "age": "age",
+    "education": "education level",
+    "currentSmoker": "being a current smoker",
+    "cigsPerDay": "cigarettes smoked per day",
+    "BPMeds": "being on blood pressure medication",
+    "prevalentStroke": "history of stroke",
+    "prevalentHyp": "hypertension",
+    "diabetes": "diabetes",
+    "totChol": "total cholesterol",
+    "sysBP": "systolic blood pressure",
+    "diaBP": "diastolic blood pressure",
+    "BMI": "BMI",
+    "heartRate": "heart rate",
+    "glucose": "glucose level",
+    # uci
+    "sex": "sex",
+    "dataset": "clinical site",
+    "cp": "chest pain type",
+    "trestbps": "resting blood pressure",
+    "chol": "cholesterol",
+    "fbs": "fasting blood sugar",
+    "restecg": "resting ECG result",
+    "thalch": "maximum heart rate achieved",
+    "exang": "exercise-induced angina",
+    "oldpeak": "ST depression (oldpeak)",
+    "slope": "ST segment slope",
+    "ca": "number of major vessels",
+    "thal": "thalassemia result",
+}
+
 st.set_page_config(
     page_title="Heart Disease Risk Prediction",
     page_icon="🫀",
@@ -49,6 +84,25 @@ def get_feature_names(preprocessor):
 
     return list(feature_names)
 
+def base_column_name(processed_name, raw_columns):
+    # processed names from one-hot encoding look like "male_1.0" or "cp_asymptomatic"
+    # strip back down to the original raw column name so it can be looked up
+    # in input_df and in FRIENDLY_NAMES
+    if processed_name in raw_columns:
+        return processed_name
+
+    for raw_col in raw_columns:
+        if processed_name.startswith(raw_col + "_"):
+            return raw_col
+
+    return processed_name
+
+def describe_feature(processed_name, raw_df):
+    raw_col = base_column_name(processed_name, raw_df.columns)
+    friendly = FRIENDLY_NAMES.get(raw_col, raw_col)
+    raw_value = raw_df.iloc[0][raw_col] if raw_col in raw_df.columns else None
+    return friendly, raw_value
+
 def predict_from_raw(raw_df, components):
     processed_array = components["preprocessor"].transform(raw_df)
     feature_names = get_feature_names(components["preprocessor"])
@@ -64,30 +118,50 @@ def predict_from_raw(raw_df, components):
 
     return probability, threshold, prediction, label, selected_df
 
-def explain_prediction(selected_df, components, prefix, top_n=3):
+def explain_prediction(selected_df, raw_df, components, prefix, top_n=3):
     explainer = build_explainer(prefix, components["model"], components["background"])
 
     # nsamples kept modest so a click stays responsive
     shap_values = explainer.shap_values(selected_df, nsamples=100)
 
     row_shap = np.array(shap_values)[0]
-    row_values = selected_df.iloc[0]
 
-    contributions = list(zip(selected_df.columns, row_values.values, row_shap))
-    contributions.sort(key=lambda c: abs(c[2]), reverse=True)
+    # pair each processed column with its shap value, then translate to
+    # a friendly label + the patient's actual raw input value
+    raw_contributions = list(zip(selected_df.columns, row_shap))
+    raw_contributions.sort(key=lambda c: abs(c[1]), reverse=True)
 
-    return contributions[:top_n]
+    described = []
+    seen_friendly_names = set()
+
+    for processed_name, shap_value in raw_contributions:
+        friendly, raw_value = describe_feature(processed_name, raw_df)
+
+        # avoid listing the same underlying field twice (can happen if a
+        # categorical field produced more than one encoded column)
+        if friendly in seen_friendly_names:
+            continue
+        seen_friendly_names.add(friendly)
+
+        described.append((friendly, raw_value, shap_value))
+
+        if len(described) == top_n:
+            break
+
+    return described
 
 def format_explanation(contributions, prediction):
     direction_word = "increasing" if prediction == 1 else "lowering"
 
     parts = []
-    for feature_name, value, shap_value in contributions:
-        if isinstance(value, float):
-            value_str = f"{value:.2f}".rstrip("0").rstrip(".")
+    for friendly_name, value, shap_value in contributions:
+        if isinstance(value, (int, float, np.floating, np.integer)):
+            value_str = f"{float(value):.2f}".rstrip("0").rstrip(".")
+            parts.append(f"**{friendly_name}** ({value_str})")
+        elif isinstance(value, str):
+            parts.append(f"**{friendly_name}** ({value})")
         else:
-            value_str = str(value)
-        parts.append(f"**{feature_name}** ({value_str})")
+            parts.append(f"**{friendly_name}**")
 
     if len(parts) > 1:
         feature_list = ", ".join(parts[:-1]) + f", and {parts[-1]}"
@@ -229,7 +303,7 @@ if st.button("Predict Heart Disease Risk"):
 
     with st.spinner("Working out why..."):
         try:
-            contributions = explain_prediction(selected_df, components, prefix)
+            contributions = explain_prediction(selected_df, input_df, components, prefix)
             explanation_sentence = format_explanation(contributions, prediction)
 
             st.subheader("Why this prediction?")
@@ -238,7 +312,7 @@ if st.button("Predict Heart Disease Risk"):
             with st.expander("See the underlying contribution values"):
                 contrib_df = pd.DataFrame(
                     contributions,
-                    columns=["Feature", "Patient Value", "Contribution (SHAP value)"]
+                    columns=["Factor", "Your Value", "Contribution (SHAP value)"]
                 )
                 st.dataframe(contrib_df, use_container_width=True)
 
